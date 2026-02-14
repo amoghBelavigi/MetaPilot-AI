@@ -1,6 +1,6 @@
 # Architecture
 
-> Technical architecture, design decisions, and system internals
+> Technical architecture, design decisions, and system internals for MetaPilot-AI
 
 ## System Diagram
 
@@ -11,7 +11,7 @@
                            │ Question
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Slack Bot (Socket Mode)                  │
+│                    Slack Bot (Socket Mode)                   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  handlers.py - Extract question + thread context     │   │
 │  └──────────────────┬───────────────────────────────────┘   │
@@ -19,9 +19,9 @@
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                       RAG Engine                            │
+│                   Metadata Assistant                        │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  engine.py - Orchestrate pipeline                    │   │
+│  │  engine.py - Orchestrate tool discovery + generation │   │
 │  └──────────────────┬───────────────────────────────────┘   │
 └─────────────────────┼───────────────────────────────────────┘
                       │
@@ -36,7 +36,7 @@
                                    ▼
                         ┌─────────────────────┐
                         │   AWS Bedrock       │
-                        │   Claude 3 Sonnet   │
+                        │   Claude 4.5 Sonnet │
                         └──────────┬──────────┘
                                    │
                     ┌──────────────┴───────────────┐
@@ -47,47 +47,51 @@
       ┌──────────────────────────┐         ┌────────────┐
       │  Alation MCP Server      │         │   Return   │
       │  (alation_server.py)     │         │  to User   │
-      └──────────┬───────────────┘         └────────────┘
+      │  9 tools, pre-formatted  │         └────────────┘
+      └──────────┬───────────────┘
                  │
                  ▼
       ┌──────────────────────────┐
       │  Alation API Adapter     │
       │  (alation_adapter.py)    │
+      │  - Auth + token exchange │
       │  - Caching (5-min TTL)   │
-      │  - Retry Logic           │
-      │  - Error Handling        │
+      │  - Retry logic           │
+      │  - HTML stripping        │
       └──────────┬───────────────┘
                  │ HTTPS + API Token
                  ▼
       ┌──────────────────────────┐
       │   Alation REST API       │
-      │   Enterprise Catalog     │
+      │   (v1 + v2 endpoints)    │
       └──────────────────────────┘
 ```
 
 ## Process Lifecycle
 
 1. **Startup**: MCP server starts on port 8000 → Slack Socket Mode connects
-2. **Message Processing**: User message → Handler extracts question → RAG Engine invoked
-3. **Tool Execution Loop**: Claude requests tool → MCP client calls server → Alation API queried → Result returned to Claude → Repeat until final answer
-4. **Response Delivery**: Answer posted to Slack thread with governance warnings
-5. **Shutdown**: MCP subprocess terminated → Connections closed
+2. **Message**: User message → Handler extracts question + thread context → Metadata Assistant invoked
+3. **Tool Loop**: Claude requests tool → MCP client calls server via SSE → Alation API queried → Result returned → Repeat until answer ready
+4. **Soft Limit**: At round 25, Claude is nudged to wrap up with what it has
+5. **Hard Limit**: At round 50, one final call without tools forces a summary
+6. **Response**: Answer split into multiple Slack messages if long, posted to thread
+7. **Shutdown**: MCP subprocess terminated → Connections closed
 
 ---
 
 ## Design Decisions
+
+### Why Tool-Augmented Generation (not RAG)?
+- No vector store, no embeddings, no pre-ingestion
+- LLM actively decides which API calls to make (agentic retrieval)
+- Every answer comes from real-time Alation data
+- Simpler architecture, always-fresh data
 
 ### Why Alation as Single Source of Truth?
 - Enterprise-grade metadata catalog with governance
 - Rich metadata: ownership, lineage, certification, classifications
 - Access control enforced at the source
 - No data duplication or drift
-
-### Why No Vector Database?
-- Queries live Alation metadata directly (always fresh)
-- Simpler architecture with fewer dependencies
-- Alation catalog is structured, not unstructured documents
-- Governance metadata (PII tags, ownership) can't be meaningfully embedded
 
 ### Why MCP (Model Context Protocol)?
 - Standardized protocol for tool execution
@@ -97,15 +101,14 @@
 
 ### Why Socket Mode?
 - No public endpoint required
-- Works behind firewalls
+- Works behind firewalls and VPN
 - Real-time bidirectional communication
 - Suitable for enterprise environments
 
-### Why Explicit "Unknown" Values?
-- No hallucination of metadata
-- Transparency about data quality
-- Encourages users to improve Alation catalog
-- Compliance and audit trail integrity
+### Why Search-First Strategy?
+- `search_table`, `search_schema`, `search_columns` find resources instantly
+- Avoids exhaustive browsing through data sources one by one
+- Reduces tool calls from 10+ to 1-2 for most queries
 
 ---
 
@@ -113,8 +116,8 @@
 
 | Layer | Component | Strategy |
 |-------|-----------|----------|
-| **1** | Alation Adapter | HTTP retries with exponential backoff. 404/403 → return None. 5xx → retry 3 times |
-| **2** | MCP Server | None from adapter → "Error: Not found". Exception → "Error: {message}" |
+| **1** | Alation Adapter | HTTP retries, 403 → re-authenticate, 404 → return None |
+| **2** | MCP Server | None from adapter → descriptive error with user guidance |
 | **3** | Generator | Tool errors passed to Claude in context. Claude explains naturally |
 | **4** | Slack Handler | Unhandled exceptions → friendly error message. Full error logged |
 
@@ -124,10 +127,10 @@
 
 | Aspect | Implementation |
 |--------|----------------|
-| **API Token** | Stored in `.env` (never committed), rotation recommended quarterly |
+| **API Token** | Refresh Token in `.env`, auto-exchanged for API Access Token |
 | **Permissions** | Token inherits user permissions (least privilege) |
 | **Operations** | All Alation API calls are read-only GET requests |
-| **Access Control** | Enforced by Alation - bot only sees what user can access |
+| **Access Control** | Enforced by Alation — bot only sees what user can access |
 | **Audit Trail** | All API calls and tool executions logged |
 
 ---
@@ -136,27 +139,13 @@
 
 ### Caching
 - **TTL**: 5 minutes (configurable in `alation_adapter.py`)
-- **Scope**: Process-level (not shared across instances)
-- **Impact**: Reduces API load by ~80% for repeated queries
-- **Response times**: Warm cache <100ms, cold cache 500-2000ms
+- **Scope**: Process-level in-memory cache + dedicated table ID cache
+- **Impact**: Reduces API load significantly for repeated queries
 
-### Scalability
-- Stateless design allows horizontal scaling
-- MCP server can be externalized for multi-bot setup
-- Consider Redis for shared cache across instances
+### Tool Execution
+- Parallel tool execution via `asyncio.gather` when Claude requests multiple tools
+- Fresh SSE connections per operation to avoid stale sessions
 
----
-
-## Monitoring Recommendations
-
-### Key Metrics
-- Tool execution success/failure rate
-- Alation API response times
-- Cache hit/miss rates
-- Slack message handling latency
-
-### Alerting
-- MCP server crashes
-- Alation API failure rate > 10%
-- Slack connection drops
-- Token expiration warnings
+### Response Delivery
+- Long responses split into multiple Slack messages at natural boundaries
+- Never cuts inside code blocks or mid-sentence

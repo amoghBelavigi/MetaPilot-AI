@@ -8,7 +8,7 @@ Note: Socket Mode (socket_mode.py) is preferred for local development.
 """
 
 from fastapi import APIRouter, Request
-from app.services.rag.engine import rag_engine
+from app.services.rag.engine import metadata_assistant
 from app.core.config import slack_client
 
 router = APIRouter()
@@ -44,7 +44,7 @@ async def slack_events(req: Request) -> dict:
     if event.get("type") == "app_mention":
         question = event["text"]
         try:
-            response = rag_engine.answer(question)
+            response = metadata_assistant.answer(question)
             say(response.answer)
         except Exception:
             say("❌ Error processing your request.")

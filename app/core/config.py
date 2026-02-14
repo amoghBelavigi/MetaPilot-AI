@@ -10,6 +10,7 @@ import ssl
 import logging
 
 import boto3
+from botocore.config import Config as BotoConfig
 from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_bolt import App
@@ -50,14 +51,7 @@ class Settings:
     # Alation credentials (for metadata catalog)
     ALATION_BASE_URL = os.getenv("ALATION_BASE_URL")
     ALATION_API_TOKEN = os.getenv("ALATION_API_TOKEN")
-    ALATION_USER_ID = os.getenv("ALATION_USER_ID")  # Optional for user-context operations
-
-    # PostgreSQL database (for vector store)
-    POSTGRES_DB = os.getenv("POSTGRES_DB")
-    POSTGRES_USER = os.getenv("POSTGRES_USER")
-    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
-    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-    POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+    ALATION_USER_ID = os.getenv("ALATION_USER_ID")
 
 
 # Global settings instance
@@ -70,12 +64,19 @@ settings = Settings()
 # SSL context for Slack client (handles certificate issues)
 ssl_context = ssl._create_unverified_context()
 
-# Bedrock runtime client for LLM and embeddings
+# Bedrock runtime client for LLM
+# Increased read_timeout (default 60s) to handle long tool-use conversations
+bedrock_config = BotoConfig(
+    read_timeout=120,
+    connect_timeout=10,
+    retries={"max_attempts": 2, "mode": "adaptive"},
+)
 bedrock_runtime = boto3.client(
     service_name="bedrock-runtime",
     region_name=settings.AWS_REGION,
     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY
+    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+    config=bedrock_config,
 )
 
 # =============================================================================

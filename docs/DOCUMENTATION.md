@@ -17,7 +17,7 @@
 ### Prerequisites
 - Python 3.10+
 - Alation instance with API access
-- AWS Account with Bedrock access (Claude 3)
+- AWS Account with Bedrock access (Claude 4.5 Sonnet)
 - Slack App with Socket Mode enabled
 
 ### 1. Setup Environment
@@ -330,11 +330,11 @@ python app/services/rag/alation_server.py
 python app/services/rag/alation_client.py
 ```
 
-**Test RAG Engine:**
+**Test Metadata Assistant:**
 ```python
-from app.services.rag.engine import rag_engine
+from app.services.rag.engine import metadata_assistant
 
-response = rag_engine.answer("What data sources are available?")
+response = metadata_assistant.answer("What data sources are available?")
 print(response.answer)
 ```
 
